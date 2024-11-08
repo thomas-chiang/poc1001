@@ -21,52 +21,50 @@ class Program
 
     static async Task Main()
     {
-        string company = "FGLIFE";
-        string formNo = "21779";
+        string csvFilePath = "1001.csv";
+        string newCsvFilePath = Path.GetFileNameWithoutExtension(csvFilePath) + "_result.csv"; // Create new file name
 
-        await ReadCsvToDictionaryAsync("com_id_code.csv");
-        // Use your own server, database, user ID, and password.
-        string connectionString = @"Server=sea-asia-tube-sqlsrv.database.windows.net;"
-                                + "Authentication=Active Directory Interactive; Encrypt=True; Database=AsiaFlowDB";
+        // Read the CSV file and process each row
+        var lines = await File.ReadAllLinesAsync(csvFilePath);
+        var updatedLines = new List<string>();
 
-
-        using (var connection = new SqlConnection(connectionString))
+        foreach (var line in lines)
         {
-            // Open the connection
-            await connection.OpenAsync();
+            var parts = line.Split(',');
 
-            Console.WriteLine("Connected to the database successfully!");
-
-            // Your SQL operations here
-            await ExecuteQueries(connection, "gbpm.PTSyncForm", company, formNo);
-            Console.WriteLine("--長期存放");
-            await ExecuteQueries(connection, "gbpm.PTSyncForm_Archive_2024", company, formNo);
-
-            // Execute the new query and store AttendanceType and AttendanceOn
-            await ExecuteAttendanceQuery(connection, company, formNo);
-
-        }
-
-        await GetCompanyCodeByComId(comId);
-
-
-
-        string comconnectionString = @"Server=sea-asia-tube-sqlsrv.database.windows.net;"
-                                + $"Authentication=Active Directory Interactive; Encrypt=True; Database=AsiaTube{companyCode}";
-
-
-        using (var comconnection = new SqlConnection(comconnectionString))
-        {
-            // Open the connection
-            await comconnection.OpenAsync();
-
-            Console.WriteLine("Connected to the company database successfully!");
-            bool allIsEffectOne = await isAllIsEffectOne(comconnection, comId, empId, attendanceOn, 1);
-            if (allIsEffectOne)
+            if (parts.Length == 2)
             {
-                await SendPostRequest();
+                // Extract the company name before the first period and remove the last character ('9')
+                string company = parts[0].Split('.')[0];
+                if (company.Length > 0 && company[company.Length - 1] == '9')
+                {
+                    company = company.Substring(0, company.Length - 1); // Remove the last character '9'
+                }
+
+                string formNo = parts[1];
+
+                Console.WriteLine(company);
+                Console.WriteLine(formNo);
+
+                // Call UseCase with company and formNo
+                var result = await UseCase(company, formNo);
+
+                if (!string.IsNullOrEmpty(result))
+                {
+                    // Append the result to the line
+                    updatedLines.Add($"{line},{result}");
+                }
+                else
+                {
+                    updatedLines.Add(line); // No result, keep the original line
+                }
             }
         }
+
+        // Write the updated lines to the new CSV file
+        await File.WriteAllLinesAsync(newCsvFilePath, updatedLines, Encoding.UTF8);
+
+        Console.WriteLine($"CSV file updated successfully! New file created: {newCsvFilePath}");
     }
 
     private static async Task<string> UseCase(string company, string formNo)
@@ -325,7 +323,7 @@ class Program
             {
                 var jsonResponse = JObject.Parse(responseBody);
                 var status = jsonResponse["Error"]?["Status"]?.ToString();
-                return status ?? string.Empty;
+                return "忘打卡_" + status;
             }
         }
         else
