@@ -6,18 +6,12 @@ using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using Newtonsoft.Json.Linq;
+using Microsoft.EntityFrameworkCore.Query;
+using Azure.Core;
+using System.Linq.Expressions;
 
 class Program
 {
-    public static List<PTSyncFormRecord> records = new List<PTSyncFormRecord>();
-    public static Guid comId;
-    public static Guid empId;
-    public static string attendanceType;
-    public static DateTimeOffset attendanceOn;
-    public static string companyCode;
-    public static Dictionary<Guid, string> data = new Dictionary<Guid, string>();
-
-    public static bool AllIsEffectOne = false;
 
     static async Task Main()
     {
@@ -30,35 +24,53 @@ class Program
 
         foreach (var line in lines)
         {
+            Console.WriteLine($"================================================================================================================================");
             var parts = line.Split(',');
-
-            if (parts.Length == 2)
+            string company = parts[0].Split('.')[0];
+            if (!parts[0].Contains("1001"))
             {
-                // Extract the company name before the first period and remove the last character ('9')
-                string company = parts[0].Split('.')[0];
-                if (company.Length > 0 && company[company.Length - 1] == '9')
-                {
-                    company = company.Substring(0, company.Length - 1); // Remove the last character '9'
-                }
-
-                string formNo = parts[1];
-
-                Console.WriteLine(company);
-                Console.WriteLine(formNo);
-
-                // Call UseCase with company and formNo
-                var result = await UseCase(company, formNo);
-
-                if (!string.IsNullOrEmpty(result))
-                {
-                    // Append the result to the line
-                    updatedLines.Add($"{line},{result}");
-                }
-                else
-                {
-                    updatedLines.Add(line); // No result, keep the original line
-                }
+                Console.WriteLine($"!!!!!!!formKind {parts[0]}, continue");
+                updatedLines.Add(line);
+                continue;
             }
+
+
+            if (company.Length > 0 && company[company.Length - 1] == '9')
+            {
+                company = company.Substring(0, company.Length - 1); // Remove the last character '9'
+            }
+
+            string formNo = parts[1];
+
+            Console.WriteLine($"company: {company}");
+            Console.WriteLine($"formNo: {formNo}");
+
+            var result = "";
+            try
+            {
+                result = await UseCase(company, formNo);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error processing company {company}, formNo {formNo}: {ex.Message}");
+            }
+
+            result = result.Replace(" ", "");
+            if (result.Contains("已結算"))
+            {
+                result = result.Replace("忘打卡_", "");
+            }
+
+
+            if (!string.IsNullOrEmpty(result))
+            {
+                updatedLines.Add($"{line},{result},預防,不用處理");
+            }
+            else
+            {
+                updatedLines.Add(line); // No result, keep the original line
+            }
+            Console.WriteLine($"================================================================================================================================");
         }
 
         // Write the updated lines to the new CSV file
@@ -69,57 +81,90 @@ class Program
 
     private static async Task<string> UseCase(string company, string formNo)
     {
-        // string company = "FGLIFE";
-        // string formNo = "21779";
-
-        await ReadCsvToDictionaryAsync("com_id_code.csv");
-        // Use your own server, database, user ID, and password.
         string connectionString = @"Server=sea-asia-tube-sqlsrv.database.windows.net;"
                                 + "Authentication=Active Directory Interactive; Encrypt=True; Database=AsiaFlowDB";
 
+        Guid comId = new Guid();
+        Guid empId = new Guid();
+        List<PTSyncFormRecord> records;
+        DateTimeOffset attendanceOn;
+        string attendanceType;
 
         using (var connection = new SqlConnection(connectionString))
         {
-            // Open the connection
             await connection.OpenAsync();
 
             Console.WriteLine("Connected to the database successfully!");
+            var PTSyncFormResult = new Dictionary<string, object> { };
+            PTSyncFormResult = await PTSyncFormQueries(connection, "gbpm.PTSyncForm", company, formNo);
+            records = (List<PTSyncFormRecord>)PTSyncFormResult["records"];
+            if (records.Count > 0)
+            {
+                comId = (Guid)PTSyncFormResult["comId"];
+                empId = (Guid)PTSyncFormResult["empId"];
+            }
 
-            // Your SQL operations here
-            await ExecuteQueries(connection, "gbpm.PTSyncForm", company, formNo);
+
+
+
             Console.WriteLine("--長期存放");
-            await ExecuteQueries(connection, "gbpm.PTSyncForm_Archive_2024", company, formNo);
+            var PTSyncFormResultFromColdStorage = new Dictionary<string, object> { };
+            PTSyncFormResultFromColdStorage = await PTSyncFormQueries(connection, "gbpm.PTSyncForm_Archive_2024", company, formNo);
+            if (records.Count == 0)
+            {
+                comId = (Guid)PTSyncFormResultFromColdStorage["comId"];
+                empId = (Guid)PTSyncFormResultFromColdStorage["empId"];
+            }
 
-            // Execute the new query and store AttendanceType and AttendanceOn
-            await ExecuteAttendanceQuery(connection, company, formNo);
+            var coldStorageRecords = (List<PTSyncFormRecord>)PTSyncFormResultFromColdStorage["records"];
+            records.AddRange(coldStorageRecords);
+            records = records.OrderBy(record => record.CreatedOn).ToList();
 
+
+            var Related9FORMResult = new Dictionary<string, object> { };
+            Related9FORMResult = await Related9FORMQuery(connection, company, formNo);
+            attendanceType = (string)Related9FORMResult["attendanceType"];
+            attendanceOn = (DateTimeOffset)Related9FORMResult["attendanceOn"];
         }
 
-        await GetCompanyCodeByComId(comId);
+
+        string allCompanyConnectionString = @"Server=sea-asia-tube-sqlsrv.database.windows.net;"
+                                + "Authentication=Active Directory Interactive; Encrypt=True; Database=AsiaTubeManageDB";
 
 
-
+        var companyCode = await GetCompanyCodeByComIdAsync(comId, new SqlConnection(allCompanyConnectionString));
         string comconnectionString = @"Server=sea-asia-tube-sqlsrv.database.windows.net;"
                                 + $"Authentication=Active Directory Interactive; Encrypt=True; Database=AsiaTube{companyCode}";
 
+        try
+        {
+            using (var comconnection = new SqlConnection(comconnectionString))
+            {
+                await comconnection.OpenAsync();
+            }
+        }
+        catch
+        {
+            comconnectionString = @"Server=sea-asia-tube-sqlsrv.database.windows.net;"
+                                + $"Authentication=Active Directory Interactive; Encrypt=True; Database=AsiaTubeDB";
+        }
 
         using (var comconnection = new SqlConnection(comconnectionString))
         {
-            // Open the connection
             await comconnection.OpenAsync();
 
             Console.WriteLine("Connected to the company database successfully!");
-            bool allIsEffectOne = await isAllIsEffectOne(comconnection, comId, empId, attendanceOn, 1);
+            bool allIsEffectOne = await IsAllIsEffect(comconnection, comId, empId, attendanceOn, int.Parse(attendanceType), int.Parse(formNo));
             if (allIsEffectOne)
             {
-                return await SendPostRequest();
+                return await SendPostRequest(records);
             }
         }
 
         return string.Empty;
     }
 
-    private static async Task ExecuteQueries(SqlConnection connection, string tableName, string company, string formNo)
+    private static async Task<Dictionary<string, object>> PTSyncFormQueries(SqlConnection connection, string tableName, string company, string formNo)
     {
         // Parameters
         string kind = "1001";
@@ -133,6 +178,10 @@ class Program
     AND FormNo IN (@FormNo)
     ORDER BY CreatedOn";
 
+        // Dictionary to hold the records and ids
+        var result = new Dictionary<string, object>();
+        var records = new List<PTSyncFormRecord>();
+
         using (SqlCommand cmd = new SqlCommand(recentQuery, connection))
         {
             cmd.Parameters.AddWithValue("@FormKind", "%" + formKind + "%");
@@ -140,6 +189,9 @@ class Program
 
             using (SqlDataReader reader = await cmd.ExecuteReaderAsync())
             {
+                Guid comId = Guid.Empty;
+                Guid empId = Guid.Empty;
+
                 while (await reader.ReadAsync())
                 {
                     // Create a record from the reader
@@ -155,20 +207,23 @@ class Program
                         RetryCount = reader.GetByte(reader.GetOrdinal("RetryCount"))
                     };
 
-                    // Add the record to the list
                     records.Add(record);
 
-                    // Print the record
                     Console.WriteLine($"CompanyId: {record.CompanyId}, UserEmployeeId: {record.UserEmployeeId}, Flag: {record.Flag}, RetryCount: {record.RetryCount}");
 
-                    comId = record.CompanyId;
-                    empId = record.UserEmployeeId;
+                    result["comId"] = record.CompanyId;
+                    result["empId"] = record.UserEmployeeId;
                 }
+
+                result["records"] = records;
+
             }
         }
+
+        return result;
     }
 
-    private static async Task ExecuteAttendanceQuery(SqlConnection connection, string company, string formNo)
+    private static async Task<Dictionary<string, object>> Related9FORMQuery(SqlConnection connection, string company, string formNo)
     {
         // Parameters for the new query
         string kind = "1001";
@@ -185,7 +240,7 @@ class Program
     FROM {tableName} f
     JOIN gbpm.fm_form_header h ON f.form_no = h.form_no
     WHERE h.form_kind = @formKind AND h.form_no = @formNo";
-
+        var result = new Dictionary<string, object>();
         using (SqlCommand cmd = new SqlCommand(attendanceQuery, connection))
         {
             // Add parameters to the command
@@ -197,79 +252,73 @@ class Program
             {
                 if (await reader.ReadAsync())
                 {
-                    attendanceType = reader.GetString(reader.GetOrdinal("AttendanceType"));
-                    attendanceOn = reader.GetDateTimeOffset(reader.GetOrdinal("AttendanceOn"));
+                    result["attendanceType"] = reader.GetString(reader.GetOrdinal("AttendanceType"));
+                    result["attendanceOn"] = reader.GetDateTimeOffset(reader.GetOrdinal("AttendanceOn"));
 
-                    // Print the attendance data
-                    Console.WriteLine($"AttendanceType: {attendanceType}, AttendanceOn: {attendanceOn}");
+                    Console.WriteLine($"AttendanceType: {result["attendanceType"]}, AttendanceOn: {result["attendanceOn"]}");
                 }
             }
         }
+
+        return result;
     }
 
 
-    private static async Task ReadCsvToDictionaryAsync(string filePath)
+    private static async Task<string> GetCompanyCodeByComIdAsync(Guid comId, SqlConnection connection)
     {
-        // Use StreamReader to read the file asynchronously
-        using (var reader = new StreamReader(filePath))
+        string companyCode = "";
+        string query = "SELECT CompanyCode FROM Company WHERE CompanyId = @CompanyId";
+
+        try
         {
-            while (!reader.EndOfStream)
+            using (SqlCommand cmd = new SqlCommand(query, connection))
             {
-                // Read each line asynchronously
-                var line = await reader.ReadLineAsync();
+                cmd.Parameters.AddWithValue("@CompanyId", comId);
 
-                // Split the line by comma to separate the UUID and the name
-                var parts = line.Split(',');
-
-                if (parts.Length == 2)
+                // Open the connection if it's not already open
+                if (connection.State != System.Data.ConnectionState.Open)
                 {
-                    // Parse the UUID and add it to the static data field with the associated name
-                    if (Guid.TryParse(parts[0], out Guid id))
-                    {
-                        data[id] = parts[1];
-                    }
-                    else
-                    {
-                        Console.WriteLine($"Invalid UUID: {parts[0]}");
-                    }
+                    await connection.OpenAsync();
+                }
+
+                var result = await cmd.ExecuteScalarAsync();
+                if (result != null)
+                {
+                    companyCode = result.ToString();
+                    Console.WriteLine($"Company Code for {comId}: {companyCode}");
+                }
+                else
+                {
+                    Console.WriteLine("Company ID not found.");
                 }
             }
         }
-        if (data.Count > 0)
+        catch (Exception ex)
         {
-            var firstEntry = data.First(); // Get the first entry from the dictionary
-            Console.WriteLine($"{firstEntry.Key}: {firstEntry.Value}");
-        }
-        else
-        {
-            Console.WriteLine("No data found.");
+            Console.WriteLine($"An error occurred: {ex.Message}");
         }
 
-    }
-
-    private static async Task GetCompanyCodeByComId(Guid comId)
-    {
-        if (data.ContainsKey(comId))
-        {
-            companyCode = data[comId];
-            Console.WriteLine($"Company Code for {comId}: {companyCode}");
-        }
-        else
-        {
-            Console.WriteLine("Company ID not found.");
-        }
+        return companyCode;
     }
 
 
-    private static async Task<bool> isAllIsEffectOne(SqlConnection connection, Guid companyId, Guid employeeId, DateTimeOffset attendanceDate, int attendanceType)
+    private static async Task<bool> IsAllIsEffect(SqlConnection connection, Guid companyId, Guid employeeId, DateTimeOffset attendanceDate, int attendanceType, int fromNo)
     {
+        Console.WriteLine("Query Company's table: AttendanceHistory");
         string query = @"
-        SELECT AttendanceHistoryId, iAttendanceType, IsEffect
-        FROM pt.AttendanceHistory
-        WHERE CompanyId = @companyId
-        AND EmployeeId = @employeeId
-        AND AttendanceDate = @attendanceDate
-        AND iAttendanceType = @attendanceType";
+        SELECT AH.AttendanceHistoryId, 
+               AH.iAttendanceType, 
+               AH.IsEffect,
+               AH.IsDeleted,  
+               AHR.SourceFormNo
+        FROM pt.AttendanceHistory AS AH
+        LEFT JOIN pt.AttendanceHistoryRecord AS AHR
+          ON AH.AttendanceHistoryId = AHR.AttendanceHistoryId
+        WHERE AH.CompanyId = @companyId
+          AND AH.EmployeeId = @employeeId
+          AND AH.AttendanceDate = @attendanceDate
+          AND AH.iAttendanceType = @attendanceType
+          AND (AHR.SourceFormNo IS NULL OR AHR.SourceFormNo = @fromNo)";
 
         using (SqlCommand cmd = new SqlCommand(query, connection))
         {
@@ -278,34 +327,38 @@ class Program
             cmd.Parameters.AddWithValue("@employeeId", employeeId);
             cmd.Parameters.AddWithValue("@attendanceDate", attendanceDate.ToString("yyyy-MM-dd"));
             cmd.Parameters.AddWithValue("@attendanceType", attendanceType);
-            Console.WriteLine("SqlCommand");
+            cmd.Parameters.AddWithValue("@fromNo", fromNo);
+
             using (SqlDataReader reader = await cmd.ExecuteReaderAsync())
             {
                 bool allIsEffectOne = true;
-                int count = 0;
                 while (await reader.ReadAsync())
                 {
                     bool isEffect = reader.GetBoolean(reader.GetOrdinal("IsEffect"));
-                    Console.WriteLine($"AttendanceHistoryId: {reader.GetGuid(reader.GetOrdinal("AttendanceHistoryId"))}, IsEffect: {isEffect}");
-                    count++;
+                    bool IsDeleted = reader.GetBoolean(reader.GetOrdinal("IsDeleted"));
+                    Console.WriteLine($"AttendanceHistoryId: {reader.GetGuid(reader.GetOrdinal("AttendanceHistoryId"))}, IsEffect: {isEffect}, IsDeleted: {IsDeleted}");
                     if (!isEffect)
                     {
                         allIsEffectOne = false;
                     }
                 }
 
-                return allIsEffectOne && count > 0;
+                return allIsEffectOne;
             }
         }
     }
 
-    private static async Task<string> SendPostRequest()
+    private static async Task<string> SendPostRequest(List<PTSyncFormRecord> records)
     {
         if (records.Count > 0)
         {
             // Get the first record's FormContent
             var formContent = records[0].FormContent;
-
+            Console.WriteLine();
+            Console.WriteLine();
+            Console.WriteLine(formContent);
+            Console.WriteLine();
+            Console.WriteLine();
             // Prepare the POST request with the form content
             var client = new HttpClient();
             var requestUri = "https://pt-be.mayohr.com/api/anonymous/ReCheckInForm";
@@ -322,8 +375,8 @@ class Program
             if (response.StatusCode == System.Net.HttpStatusCode.BadRequest)
             {
                 var jsonResponse = JObject.Parse(responseBody);
-                var status = jsonResponse["Error"]?["Status"]?.ToString();
-                return "忘打卡_" + status;
+                var title = jsonResponse["Error"]?["Title"]?.ToString();
+                return "忘打卡_" + title;
             }
         }
         else
@@ -339,12 +392,12 @@ public class PTSyncFormRecord
 {
     public Guid CompanyId { get; set; }
     public Guid UserEmployeeId { get; set; }
-    public string FormContent { get; set; }
+    public required string FormContent { get; set; }
     public int FormAction { get; set; }
     public DateTime CreatedOn { get; set; }
     public DateTime ModifiedOn { get; set; }
     public int Flag { get; set; }
     public int RetryCount { get; set; }
-    public int AttendanceType { get; set; } // Add this property
-    public DateTimeOffset AttendanceOn { get; set; } // Add this property
+    public int AttendanceType { get; set; }
+    public DateTimeOffset AttendanceOn { get; set; }
 }
