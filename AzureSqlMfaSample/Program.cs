@@ -89,6 +89,7 @@ class Program
         List<PTSyncFormRecord> records;
         DateTimeOffset attendanceOn;
         string attendanceType;
+        string form_status;
 
         using (var connection = new SqlConnection(connectionString))
         {
@@ -125,6 +126,7 @@ class Program
             Related9FORMResult = await Related9FORMQuery(connection, company, formNo);
             attendanceType = (string)Related9FORMResult["attendanceType"];
             attendanceOn = (DateTimeOffset)Related9FORMResult["attendanceOn"];
+            form_status = (string)Related9FORMResult["form_status"];
         }
 
 
@@ -152,12 +154,12 @@ class Program
         using (var comconnection = new SqlConnection(comconnectionString))
         {
             await comconnection.OpenAsync();
-
+            HashSet<string> validStatuses = new HashSet<string> { "AP", "UA", "WA", "RC" };
             Console.WriteLine("Connected to the company database successfully!");
             bool allIsEffectOne = await IsAllIsEffect(comconnection, comId, empId, attendanceOn, int.Parse(attendanceType), int.Parse(formNo));
-            if (allIsEffectOne)
+            if (allIsEffectOne && validStatuses.Contains(form_status))
             {
-                return await SendPostRequest(records);
+                return await SendPostRequest(records, attendanceType, form_status);
             }
         }
 
@@ -210,6 +212,8 @@ class Program
                     records.Add(record);
 
                     Console.WriteLine($"CompanyId: {record.CompanyId}, UserEmployeeId: {record.UserEmployeeId}, Flag: {record.Flag}, RetryCount: {record.RetryCount}");
+                    Console.WriteLine($"FormContent: {record.FormContent}");
+                    Console.WriteLine($"FormAction: {record.FormAction}");
 
                     result["comId"] = record.CompanyId;
                     result["empId"] = record.UserEmployeeId;
@@ -225,6 +229,7 @@ class Program
 
     private static async Task<Dictionary<string, object>> Related9FORMQuery(SqlConnection connection, string company, string formNo)
     {
+        Console.WriteLine("Related9FORMQuery");
         // Parameters for the new query
         string kind = "1001";
         string formKind = $"{company}9.FORM.{kind}";
@@ -235,6 +240,7 @@ class Program
         // Query to get attendance data
         string attendanceQuery = $@"
     SELECT
+        h.form_status,
         f.ATTENDANCETYPE AS AttendanceType,
         CONVERT(DATETIMEOFFSET, (CONVERT(NVARCHAR, f.[DATETIME], 126) + f.TIMEZONE)) AT TIME ZONE 'UTC' AS AttendanceOn
     FROM {tableName} f
@@ -254,8 +260,9 @@ class Program
                 {
                     result["attendanceType"] = reader.GetString(reader.GetOrdinal("AttendanceType"));
                     result["attendanceOn"] = reader.GetDateTimeOffset(reader.GetOrdinal("AttendanceOn"));
+                    result["form_status"] = reader.GetString(reader.GetOrdinal("form_status"));
 
-                    Console.WriteLine($"AttendanceType: {result["attendanceType"]}, AttendanceOn: {result["attendanceOn"]}");
+                    Console.WriteLine($"AttendanceType: {result["attendanceType"]}, AttendanceOn: {result["attendanceOn"]}, form_status: {result["form_status"]}");
                 }
             }
         }
@@ -348,26 +355,48 @@ class Program
         }
     }
 
-    private static async Task<string> SendPostRequest(List<PTSyncFormRecord> records)
+    private static async Task<string> SendPostRequest(List<PTSyncFormRecord> records, string attendanceType, string form_status)
     {
         if (records.Count > 0)
         {
+            var client = new HttpClient();
+            Console.WriteLine();
+            Console.WriteLine();
+            var formContent = "";
+            var requestUri = "";
+            HttpResponseMessage response = null;
+
+            if (form_status == "RC")
+            {
+                var record = records.FirstOrDefault(r => r.FormAction == 1);
+                if (record != null)
+                {
+                    formContent = record.FormContent;
+                    // requestUri = "https://pt-be.mayohr.com/api/anonymous/ReCheckInForm/Recalled";
+                    // var content = new StringContent(formContent, Encoding.UTF8, "application/json");
+                    // response = await client.PutAsync(requestUri, content);
+                    requestUri = "https://pt-be.mayohr.com/api/anonymous/ReCheckInForm";
+                    var content = new StringContent(formContent, Encoding.UTF8, "application/json");
+                    response = await client.PostAsync(requestUri, content);
+                }
+                
+            }
+            else
+            {
+                formContent = records[0].FormContent;
+                requestUri = "https://pt-be.mayohr.com/api/anonymous/ReCheckInForm";
+                var content = new StringContent(formContent, Encoding.UTF8, "application/json");
+                response = await client.PostAsync(requestUri, content);
+            }
             // Get the first record's FormContent
-            var formContent = records[0].FormContent;
-            Console.WriteLine();
-            Console.WriteLine();
+
             Console.WriteLine(formContent);
             Console.WriteLine();
             Console.WriteLine();
-            // Prepare the POST request with the form content
-            var client = new HttpClient();
-            var requestUri = "https://pt-be.mayohr.com/api/anonymous/ReCheckInForm";
+            
+            
 
-            // Prepare the request body with the correct Content-Type header
-            var content = new StringContent(formContent, Encoding.UTF8, "application/json");
 
-            // Send the POST request
-            var response = await client.PostAsync(requestUri, content);
 
             // Ensure success or handle errors
             var responseBody = await response.Content.ReadAsStringAsync();
@@ -376,6 +405,10 @@ class Program
             {
                 var jsonResponse = JObject.Parse(responseBody);
                 var title = jsonResponse["Error"]?["Title"]?.ToString();
+                if (title == "申請單狀態為已駁回才可修改重送" && attendanceType == "6")
+                {
+                    title = "一般拋轉失敗，但資料一致";
+                }
                 return "忘打卡_" + title;
             }
         }

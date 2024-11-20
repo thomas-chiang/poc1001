@@ -27,8 +27,40 @@ class Program
                 company = company.Substring(0, company.Length - 1);
             }
             string formNo = secondCell;
-            
-            if (!firstCell.Contains("1004"))
+
+            if (firstCell.Contains("1004"))
+            {
+                var result = "";
+                try
+                {
+                    var investigation = new Investigate1004(company, formNo);
+                    investigation.InvestigateGaiaForm();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"investigation Error");
+                    Console.WriteLine($"investigation Error");
+                    Console.WriteLine($"Error processing company {company}, formNo {formNo}: {ex.Message}");
+                    Console.WriteLine($"investigation Error");
+                    Console.WriteLine($"investigation Error");
+                }
+                result = result.Replace(" ", "");
+                if (result.Contains("已結算"))
+                {
+                    result = result.Replace("忘打卡_", "");
+                }
+
+
+                if (!string.IsNullOrEmpty(result))
+                {
+                    updatedLines.Add($"{line},{result},預防,不用處理");
+                }
+                else
+                {
+                    updatedLines.Add(line); // No result, keep the original line
+                }
+            }
+            else
             {
                 Console.WriteLine($"Other formKind: {firstCell}, continue");
                 updatedLines.Add(line);
@@ -37,37 +69,11 @@ class Program
 
 
 
-            var result = "";
-            try
-            {
-                var investigation = new Investigate1004("MyCompany", "Form123");
-            }
-            catch (Exception ex)
-            {   
-                Console.WriteLine($"investigation Error");
-                Console.WriteLine($"investigation Error");
-                Console.WriteLine($"Error processing company {company}, formNo {formNo}: {ex.Message}");
-                Console.WriteLine($"investigation Error");
-                Console.WriteLine($"investigation Error");
-            }
 
 
 
-            result = result.Replace(" ", "");
-            if (result.Contains("已結算"))
-            {
-                result = result.Replace("忘打卡_", "");
-            }
 
 
-            if (!string.IsNullOrEmpty(result))
-            {
-                updatedLines.Add($"{line},{result},預防,不用處理");
-            }
-            else
-            {
-                updatedLines.Add(line); // No result, keep the original line
-            }
             Console.WriteLine($"================================================================================================================================");
         }
 
