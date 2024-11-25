@@ -31,19 +31,23 @@ class Program
             if (firstCell.Contains("1004"))
             {
                 var result = "";
-                try
-                {
-                    var investigation = new Investigate1004(company, formNo);
+                 var investigation = new Investigate1004(company, formNo);
                     investigation.InvestigateGaiaForm();
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"investigation Error");
-                    Console.WriteLine($"investigation Error");
-                    Console.WriteLine($"Error processing company {company}, formNo {formNo}: {ex.Message}");
-                    Console.WriteLine($"investigation Error");
-                    Console.WriteLine($"investigation Error");
-                }
+                var companyCode = investigation.GetCompanyCodeByComIdAsync(investigation.companyId);
+                Console.WriteLine(companyCode);
+                // try
+                // {
+                //     var investigation = new Investigate1004(company, formNo);
+                //     investigation.InvestigateGaiaForm();
+                // }
+                // catch (Exception ex)
+                // {
+                //     Console.WriteLine($"investigation Error");
+                //     Console.WriteLine($"investigation Error");
+                //     Console.WriteLine($"Error processing company {company}, formNo {formNo}: {ex.Message}");
+                //     Console.WriteLine($"investigation Error");
+                //     Console.WriteLine($"investigation Error");
+                // }
                 result = result.Replace(" ", "");
                 if (result.Contains("已結算"))
                 {
