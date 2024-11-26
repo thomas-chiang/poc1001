@@ -107,18 +107,26 @@ class Program
 
 
 
-
-            Console.WriteLine("--長期存放");
-            var PTSyncFormResultFromColdStorage = new Dictionary<string, object> { };
-            PTSyncFormResultFromColdStorage = await PTSyncFormQueries(connection, "gbpm.PTSyncForm_Archive_2024", company, formNo);
-            if (records.Count == 0)
+            try
             {
-                comId = (Guid)PTSyncFormResultFromColdStorage["comId"];
-                empId = (Guid)PTSyncFormResultFromColdStorage["empId"];
+
+                Console.WriteLine("--長期存放");
+                var PTSyncFormResultFromColdStorage = new Dictionary<string, object> { };
+                PTSyncFormResultFromColdStorage = await PTSyncFormQueries(connection, "gbpm.PTSyncForm_Archive_2024", company, formNo);
+                if (records.Count == 0)
+                {
+                    comId = (Guid)PTSyncFormResultFromColdStorage["comId"];
+                    empId = (Guid)PTSyncFormResultFromColdStorage["empId"];
+                }
+                var coldStorageRecords = (List<PTSyncFormRecord>)PTSyncFormResultFromColdStorage["records"];
+                records.AddRange(coldStorageRecords);
+            } catch (Exception ex)
+            {
+                Console.WriteLine($"長期存放error: {ex.Message}");
             }
 
-            var coldStorageRecords = (List<PTSyncFormRecord>)PTSyncFormResultFromColdStorage["records"];
-            records.AddRange(coldStorageRecords);
+
+
             records = records.OrderBy(record => record.CreatedOn).ToList();
 
 
@@ -156,8 +164,8 @@ class Program
             await comconnection.OpenAsync();
             HashSet<string> validStatuses = new HashSet<string> { "AP", "UA", "WA", "RC" };
             Console.WriteLine("Connected to the company database successfully!");
-            bool allIsEffectOne = await IsAllIsEffect(comconnection, comId, empId, attendanceOn, int.Parse(attendanceType), int.Parse(formNo));
-            if (allIsEffectOne && validStatuses.Contains(form_status))
+            bool allowToReq = await allowToReqAfterApolloDB(comconnection, comId, empId, attendanceOn, int.Parse(attendanceType), int.Parse(formNo));
+            if (allowToReq && validStatuses.Contains(form_status))
             {
                 return await SendPostRequest(records, attendanceType, form_status);
             }
@@ -309,7 +317,7 @@ class Program
     }
 
 
-    private static async Task<bool> IsAllIsEffect(SqlConnection connection, Guid companyId, Guid employeeId, DateTimeOffset attendanceDate, int attendanceType, int fromNo)
+    private static async Task<bool> allowToReqAfterApolloDB(SqlConnection connection, Guid companyId, Guid employeeId, DateTimeOffset attendanceDate, int attendanceType, int fromNo)
     {
         Console.WriteLine("Query Company's table: AttendanceHistory");
         string query = @"
@@ -338,7 +346,7 @@ class Program
 
             using (SqlDataReader reader = await cmd.ExecuteReaderAsync())
             {
-                bool allIsEffectOne = true;
+                bool allowToReq = true;
                 while (await reader.ReadAsync())
                 {
                     bool isEffect = reader.GetBoolean(reader.GetOrdinal("IsEffect"));
@@ -346,11 +354,11 @@ class Program
                     Console.WriteLine($"AttendanceHistoryId: {reader.GetGuid(reader.GetOrdinal("AttendanceHistoryId"))}, IsEffect: {isEffect}, IsDeleted: {IsDeleted}");
                     if (!isEffect)
                     {
-                        allIsEffectOne = false;
+                        allowToReq = false;
                     }
                 }
 
-                return allIsEffectOne;
+                return allowToReq;
             }
         }
     }
@@ -379,7 +387,7 @@ class Program
                     var content = new StringContent(formContent, Encoding.UTF8, "application/json");
                     response = await client.PostAsync(requestUri, content);
                 }
-                
+
             }
             else
             {
@@ -393,8 +401,8 @@ class Program
             Console.WriteLine(formContent);
             Console.WriteLine();
             Console.WriteLine();
-            
-            
+
+
 
 
 
