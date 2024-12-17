@@ -120,7 +120,8 @@ class Program
                 }
                 var coldStorageRecords = (List<PTSyncFormRecord>)PTSyncFormResultFromColdStorage["records"];
                 records.AddRange(coldStorageRecords);
-            } catch (Exception ex)
+            }
+            catch (Exception ex)
             {
                 Console.WriteLine($"長期存放error: {ex.Message}");
             }
@@ -162,7 +163,7 @@ class Program
         using (var comconnection = new SqlConnection(comconnectionString))
         {
             await comconnection.OpenAsync();
-            HashSet<string> validStatuses = new HashSet<string> { "AP", "UA", "WA", "RC" };
+            HashSet<string> validStatuses = new HashSet<string> { "AP", "UA", "WA", "RC", "SA", "RJ" };
             Console.WriteLine("Connected to the company database successfully!");
             bool allowToReq = await allowToReqAfterApolloDB(comconnection, comId, empId, attendanceOn, int.Parse(attendanceType), int.Parse(formNo));
             if (allowToReq && validStatuses.Contains(form_status))
@@ -377,7 +378,7 @@ class Program
             if (form_status == "RC")
             {
                 var record = records.FirstOrDefault(r => r.FormAction == 1);
-                if (record != null)
+                if (record != null && record.Flag == 2)
                 {
                     formContent = record.FormContent;
                     // requestUri = "https://pt-be.mayohr.com/api/anonymous/ReCheckInForm/Recalled";
@@ -387,7 +388,22 @@ class Program
                     var content = new StringContent(formContent, Encoding.UTF8, "application/json");
                     response = await client.PostAsync(requestUri, content);
                 }
+                else if (records.FirstOrDefault(r => r.FormAction == 3) != null)
+                {
+                    record = records.FirstOrDefault(r => r.FormAction == 3);
+                    formContent = record?.FormContent ?? "";
+                    // requestUri = "https://pt-be.mayohr.com/api/anonymous/ReCheckInForm/Recalled";
+                    // var content = new StringContent(formContent, Encoding.UTF8, "application/json");
+                    // response = await client.PutAsync(requestUri, content);
+                    requestUri = "https://pt-be.mayohr.com/api/anonymous/ReCheckInForm/Recalled";
+                    var content = new StringContent(formContent, Encoding.UTF8, "application/json");
+                    response = await client.PutAsync(requestUri, content);
+                }
 
+            }
+            else if (records.Count(r => r.FormAction == 1) > 1 && records.Any(r => r.FormAction == 1 && r.Flag == 1))
+            {
+                return "忘打卡_重複申請望打卡";
             }
             else
             {
